@@ -1,12 +1,44 @@
-from integrations.ollama_client import send_messages
+from utils.ollama_client import send_messages, set_debug
 import os
 from pathlib import Path
 import json
-from integrations.swagger_parser import extract_endpoints_swagger2
+from utils.swagger_parser import extract_endpoints_swagger2
 import glob
+from prompts import search_implementation, merge_results, generate_cases, write_tests
+import argparse
+
+
+def strip_markdown(text: str) -> str:
+    """Удаляет markdown-разметку (блоки кода), если она есть, и извлекает содержимое первого блока."""
+    text = text.strip()
+    if "```" in text:
+        # Пытаемся найти начало первого блока
+        start_idx = text.find("```")
+        # Пропускаем саму метку ``` и возможный идентификатор языка (например, ```json)
+        after_start = text[start_idx+3:]
+        first_newline = after_start.find("\n")
+        if first_newline != -1:
+            content_start = start_idx + 3 + first_newline + 1
+        else:
+            content_start = start_idx + 3
+        
+        # Ищем конец блока
+        end_idx = text.find("```", content_start)
+        if end_idx != -1:
+            return text[content_start:end_idx].strip()
+    return text
+
+# Парсинг аргументов командной строки
+parser = argparse.ArgumentParser(description="API Test Generator")
+parser.add_argument("--debug", action="store_true", help="Включить подробный вывод")
+args = parser.parse_args()
+
+# Установка режима отладки
+set_debug(args.debug)
+
 # 1. Получаем список всех доступных сервисов(абсолютные пути)
 
-available_services = []
+
 source_codes_path = os.path.join(os.path.dirname(__file__), "source_codes")
 services = [p for p in Path(source_codes_path).iterdir() if p.is_dir()]
 
@@ -20,220 +52,98 @@ for service in services:
     endpoints = extract_endpoints_swagger2(swagger)
     
     for endpoint in endpoints:
-
-        # 4. Получаем абсолютный путь ко всем файлам сервиса
+        print(f"\nProcessing endpoint: {endpoint['method']} {endpoint['path']}")
+ 
+         # 4. Получаем абсолютный путь ко всем файлам сервиса
         files_path = os.path.join(service, "**", "*")
         files = glob.glob(files_path, recursive=True)
         # Исключаем файл swagger.json
-        files = [f for f in files if not os.path.basename(f) == "swagger.json"]
+        files = [f for f in files if not os.path.basename(f) == "swagger.json" and os.path.isfile(f)]
+        
+        # Приоритизация файлов: контроллеры, роуты и хендлеры в начало списка
+        def file_priority(filepath):
+            name = filepath.lower()
+            if any(k in name for k in ['route', 'controller', 'handler', 'api', 'rest']):
+                return 0
+            return 1
+        
+        files.sort(key=file_priority)
         
         # 5. Получаем реализацию эндпоинта в исходном коде
-        already_checked = []
-        prompt = f"""
-        Реализация эндпоинта {endpoint["method"]} {endpoint["path"]} не найдена в ранее проверенных файлах: {already_checked}.
-
-        Доступные файлы:
-        {files}
-
-        Текущий эндпоинт из Swagger:
-        - method: {endpoint["method"]}
-        - path: {endpoint["path"]}
-        - summary: {endpoint["summary"] or "null"}
-        - operationId: {endpoint.get("operation_id", "null")}
-
-        Задача:
-        1. Если у тебя ещё нет содержимого файла с реализацией — выбери один наиболее вероятный файл и вызови инструмент get_file_contents.
-        2. Если содержимое файла уже получено и реализация подтверждена — верни результат строго по правилам.
-        3. Обязательно разыменуй ВСЕ $ref в схемах (из swagger.json). Для этого можешь сначала вызвать get_file_contents на swagger.json, если схема неизвестна.
-        4. В итоговом JSON не должно быть ни одного "$ref" — все схемы должны быть полностью раскрыты.
-
-        Сейчас выполни необходимый шаг: вызови инструмент (если нужно содержимое) или верни готовый JSON с разыменованными схемами.
-        """
-
-        system_prompt = """
-        Ты — детерминированный анализатор исходного кода и Swagger-спецификаций для поиска и описания реализации API-эндпоинтов.
-
-        ПРАВИЛА ПОВЕДЕНИЯ:
-        1. Ты строго следуешь только инструкциям из пользовательского сообщения. Никаких собственных интерпретаций.
-        2. Ты НЕ объясняешь действия, НЕ рассуждаешь вслух, НЕ добавляешь комментарии или пояснения.
-        3. Твой вывод содержит ТОЛЬКО то, что явно требуется: вызов инструмента или чистый JSON указанной структуры.
-        4. Любой текст вне требуемого формата — критическая ошибка.
-        5. Запрещено markdown, код-блоки, кавычки вокруг JSON.
-
-        РАБОТА С ИНСТРУМЕНТАМИ:
-        6. Если нужно содержимое файла — вызывай инструмент get_file_contents.
-        7. Формат вызова инструмента ТОЛЬКО:
-        <tool_call>
-        <parameter name="file_path">полный_путь_к_файлу</parameter>
-        </tool_call>
-
-        РАЗЫМЕНОВЫВАНИЕ $REF В SWAGGER:
-        8. Если в схемах responses, requestBody или parameters встречается "$ref": "#/definitions/..." или "#/components/schemas/...":
-        - Ты ДОЛЖЕН заменить весь объект с $ref на полную разыменованную схему из swagger.json.
-        - Если схема ссылается на другую схему — рекурсивно разыменуй все вложенные $ref.
-        - Никогда не оставляй $ref в итоговом JSON.
-        9. Источник правды для схем — файл swagger.json. Если нужно получить/проверить схему — сначала вызови инструмент для swagger.json.
-
-        ФОРМАТ ВЫВОДА (ТОЛЬКО ОДИН ИЗ НИХ):
-        10. Если реализация найдена — ТОЛЬКО чистый JSON со всеми $ref разыменованными:
-        {
-        "found": true,
-        "file": "полный_путь_к_файлу",
-        "method": "string",
-        "path": "string",
-        "summary": "string или null",
-        "description": "string или null",
-        "parameters": [ массив объектов с полностью разыменованными schema ],
-        "requestBody": объект с полностью разыменованной schema или null,
-        "responses": {
-            "код": {
-            "description": "string",
-            "content": {
-                "application/json": {
-                "schema": полностью разыменованная схема (без $ref)
-                }
-            }
-            },
-            ...
-        },
-        "tags": [ массив строк ],
-        "operationId": "string или null"
-        }
-
-        11. Если реализация не найдена — ТОЛЬКО JSON:
-        {
-        "found": false,
-        "file": "полный_путь_к_файлу",
-        "reason": "implementation not found"
-        }
-
-        12. Никаких дополнительных полей, никаких $ref в схемах.
-        """
+        system_prompt = search_implementation.SYSTEM_PROMPT
         history = []
         i = 0
         source_code_schema = ""
-        while i < 10: # 10 попыток найти реализацию
-            result, all_messages = send_messages(prompt, history, system_prompt)
-            result = json.loads(result)
-            if result.get("found"):
-                source_code_schema = result
-                break
-            history = all_messages
-            already_checked.append(result.get("file"))
-            i += 1
+        
+        prompt = search_implementation.get_user_prompt(
+            endpoint["method"], 
+            endpoint["path"], 
+            files, 
+            endpoint
+        )
+        result, all_messages = send_messages(
+            prompt, 
+            history, 
+            system_prompt, 
+            step_name="Поиск реализации"
+        )
+
+        source_code_schema = strip_markdown(result)
+
+        exit()
 
         # 6. Объединяем результаты в один JSON
-        prompt = f"""
-        Задача:
-        Объединить описание эндпоинта из Swagger-спецификации и анализа исходного кода в один монолитный JSON.
+        prompt = merge_results.get_user_prompt(endpoint, source_code_schema)
 
-        Описание из Swagger:
-        {endpoint}
+        system_prompt = merge_results.SYSTEM_PROMPT
 
-        Описание из анализа исходного кода:
-        {source_code_schema}
-
-        Требования:
-        - Приоритет у данных из Swagger (контракт API).
-        - Добавить поле "file" из анализа кода (если есть реализация).
-        - Все схемы уже разыменованы — сохрани их без $ref.
-        - Удали лишние поля (например, x_unresolved_refs, внутренние метаданные).
-        - Приведи к единому чистому виду: null для отсутствующих значений, пустые массивы/объекты.
-        - Верни ТОЛЬКО объединённый JSON, ничего больше.
-        """
-
-        system_prompt = f"""
-        Ты — детерминированный объединитель описаний API-эндпоинта из Swagger-спецификации и анализа исходного кода.
-
-        ПРАВИЛА ПОВЕДЕНИЯ:
-        1. Ты строго следуешь только инструкциям из пользовательского сообщения. Никаких интерпретаций.
-        2. Ты НЕ объясняешь действия, НЕ рассуждаешь, НЕ добавляешь комментарии или пояснения.
-        3. Твой вывод — ТОЛЬКО чистый JSON требуемой структуры. Никакого текста вне JSON.
-        4. Запрещено markdown, код-блоки, кавычки вокруг JSON.
-
-        ПРАВИЛА ОБЪЕДИНЕНИЯ:
-        5. Источник правды для контракта — Swagger-спецификация. Поля из Swagger имеют приоритет.
-        6. Поля из анализа исходного кода используются только для дополнения (например, подтверждение file, уточнение логики, если явно видно).
-        7. Исключи дубликаты, неровности и ошибки:
-        - Все $ref уже разыменованы (не должно быть $ref в результате).
-        - Удаляй избыточные поля (например, x_unresolved_refs).
-        - Приводи к единому стилю: null вместо отсутствующих значений, пустые массивы/объекты где нужно.
-        - Не добавляй поля 'found' и 'file' в итоговом JSON.
-        8. Обязательные поля в итоговом JSON:
-        - "method": строка
-        - "path": строка
-        - "summary": строка или null
-        - "description": строка или null
-        - "parameters": массив объектов (полностью разыменованные)
-        - "requestBody": объект (с разыменованной schema) или null
-        - "responses": объект с кодами статусов (полностью разыменованные schema)
-        - "tags": массив строк
-        - "operationId": строка или null
-
-        9. Если поле отсутствует в обоих источниках — используй null или пустой контейнер ([] / {{}}).
-        10. Не добавляй поля, которых нет в исходных данных.
-        11. Результат должен быть монолитным, валидным, удобочитаемым JSON (правильные отступы не нужны — только чистый JSON).
-        """
-
-        merged_schema, _ = send_messages(prompt, history=None, system_prompt=system_prompt)
+        merged_schema, _ = send_messages(
+            prompt, 
+            system_prompt=system_prompt, 
+            use_tools=False,
+            step_name="Объединение результатов (Swagger + Code)"
+        )
+        merged_schema = strip_markdown(merged_schema)
 
         # 7. Генерируем кейсы
-        prompt = f"""
-        Задача:
-        Сгенерировать 15–20 функциональных тест-кейсов для следующего эндпоинта.
+        prompt = generate_cases.get_user_prompt(merged_schema)
 
-        Полное описание эндпоинта:
-        {merged_schema}
+        system_prompt = generate_cases.SYSTEM_PROMPT
 
-        Правила:
-        - Использовать ТОЛЬКО данные из приведённой схемы.
-        - Если у эндпоинта нет параметров и тела запроса — генерировать только те негативные кейсы, которые возможны (неверный метод, неверный Accept и т.п.).
-        - Позитивные кейсы проверяют успешный ответ и соответствие схеме.
-        - Негативные кейсы используют только клиентские ошибки (4xx). Запрещено 500.
-        - Не добавлять вымышленные параметры или заголовки.
+        gen_cases, _ = send_messages(
+            prompt, 
+            system_prompt=system_prompt, 
+            use_tools=False,
+            step_name="Генерация тестовых кейсов"
+        )
+        gen_cases = strip_markdown(gen_cases)
+        
+        root_path_services = os.path.join(os.path.dirname(__file__), "services")
+        service_test_dir = os.path.join(root_path_services, service.name)
+        
+        endpoint_filename = endpoint['path'].strip('/').replace('/', '_') or "root"
+        full_path_endpoint = os.path.join(service_test_dir, f"{endpoint_filename}.py")
+        
+        # 8. Формируем файл с тестами
+        system_prompt = write_tests.SYSTEM_PROMPT
+ 
+        prompt = write_tests.get_user_prompt(full_path_endpoint, root_path_services, gen_cases)
 
-        Верни ТОЛЬКО JSON-массив тест-кейсов строго по формату из системной инструкции.
-        Никакого дополнительного текста.
-        """
+        history = []
+        max_attempts = 20  # Максимум 20 попыток для защиты от бесконечного цикла
+        i = 0
+        
+        while i < max_attempts:
+            result, all_messages = send_messages(
+                prompt, 
+                history=history, 
+                system_prompt=system_prompt,
+                step_name=f"Создание файла тестов (попытка {i+1})"
+            )
+            history = all_messages
+            clean_result = result.strip()
 
-        system_prompt = f"""
-        Ты — детерминированный генератор функциональных автотест-кейсов для REST API.
-
-        ПРАВИЛА ПОВЕДЕНИЯ:
-        1. Ты строго следуешь только инструкциям из пользовательского сообщения.
-        2. Ты НЕ объясняешь действия, НЕ рассуждаешь, НЕ добавляешь никакой текст вне JSON.
-        3. Твой ответ — ТОЛЬКО чистый JSON-массив тест-кейсов. Никаких markdown, код-блоков, пояснений.
-
-        ПРАВИЛА ГЕНЕРАЦИИ:
-        4. Генерируй ровно 15–20 тест-кейсов.
-        5. Все кейсы основаны ИСКЛЮЧИТЕЛЬНО на предоставленной схеме эндпоинта.
-        6. Не выдумывай параметры, заголовки, тело запроса, статус-коды, которые отсутствуют в схеме.
-        7. Если в эндпоинте нет query-параметров, path-параметров или requestBody — не генерируй кейсы по их валидации.
-        8. Позитивные кейсы — только успешные статус-коды (200, 201, 204 и т.д.).
-        9. Негативные кейсы — только клиентские ошибки (400, 401, 403, 404, 405, 406, 415, 422 и т.д.). Запрещено использовать 500.
-        10. Не генерируй кейсы на безопасность (SQLi, XSS), производительность, CORS, rate limiting — если это не указано явно в схеме.
-        11. Типы кейсов: "positive", "negative", "validation", "error-handling".
-
-        СТРОГИЙ ФОРМАТ КАЖДОГО ТЕСТ-КЕЙСА:
-        12. Каждый объект в массиве должен содержать ровно следующие поля:
-        {{
-        "id": "string",                 // например "TC-001", уникальный
-        "title": "string",              // краткое название
-        "type": "positive|negative|validation|error-handling",
-        "description": "string",        // подробное описание шагов и ожидаемого результата на русском языке
-        "method": "string",
-        "path": "string",
-        "query_params": object или null,
-        "headers": object или null,
-        "body": object или null,
-        "expected_status": integer,
-        "expected_response": object или string или null   // может быть частичная схема, описание или null
-        }}
-
-        13. query_params, headers, body — null, если не используются в кейсе.
-        14. Все строки на русском языке.
-        15. ID нумеруются последовательно: TC-001, TC-002, ...
-        """
-
-        gen_cases, _ = send_messages(prompt, history=None, system_prompt=system_prompt)
-    
+            if clean_result.upper() == "DONE":
+                break
+            
+            i += 1

@@ -15,20 +15,30 @@ def load_swagger_json(path: str) -> Dict[str, Any]:
 
 def _deref_swagger2_schema(schema: Any, swagger: Dict[str, Any], *, _stack: Tuple[str, ...] = ()) -> Any:
     """
-    Deref $ref вида '#/definitions/NAME' рекурсивно.
+    Deref $ref вида '#/definitions/NAME' или '#/components/schemas/NAME' рекурсивно.
     - цикл -> {'type':'object','x-circular_ref': ref}
     - нерешённое -> {'x-unresolved_ref': ref}
     ВАЖНО: возвращает inline-объект (не оставляет '$ref' если ref решаемый).
     """
-    defs = swagger.get("definitions", {}) or {}
-
     def resolve_ref(ref: str) -> Any:
-        if not ref.startswith("#/definitions/"):
+        if not isinstance(ref, str) or not ref.startswith("#/"):
             return {"x-unresolved_ref": ref}
-        name = ref.split("/", 2)[-1]
-        if name not in defs:
+        
+        parts = ref.split("/")
+        current = swagger
+        try:
+            for part in parts[1:]: # пропускаем '#'
+                # Обработка URL-encoding (например, ~1 для / и ~0 для ~)
+                part = part.replace("~1", "/").replace("~0", "~")
+                if isinstance(current, dict) and part in current:
+                    current = current[part]
+                elif isinstance(current, list) and part.isdigit():
+                    current = current[int(part)]
+                else:
+                    return {"x-unresolved_ref": ref}
+            return current
+        except Exception:
             return {"x-unresolved_ref": ref}
-        return defs[name]
 
     if isinstance(schema, list):
         return [_deref_swagger2_schema(x, swagger, _stack=_stack) for x in schema]
@@ -103,24 +113,38 @@ def _extract_request_body_from_params(params: List[Dict[str, Any]], swagger: Dic
 
 
 def _deref_parameters(params: List[Dict[str, Any]], swagger: Dict[str, Any], unresolved: List[str]) -> None:
-    for p in params:
+    for i, p in enumerate(params):
         if not isinstance(p, dict):
             continue
+        
+        # Если сам параметр — это $ref
+        if "$ref" in p:
+            p = _deref_swagger2_schema(p, swagger)
+            params[i] = p
+            _collect_unresolved_refs(p, unresolved)
+
         if "schema" in p:
             p["schema"] = _deref_swagger2_schema(p["schema"], swagger)
             _collect_unresolved_refs(p["schema"], unresolved)
+        
         # formData/body/query params могут иметь items/properties и т.п. без schema
-        # но в Swagger 2.0 это тоже schema-like структура внутри самого параметра:
-        for k in ("items",):
+        for k in ("items", "properties"):
             if k in p:
                 p[k] = _deref_swagger2_schema(p[k], swagger)
                 _collect_unresolved_refs(p[k], unresolved)
 
 
 def _deref_responses(responses: Dict[str, Any], swagger: Dict[str, Any], unresolved: List[str]) -> None:
-    for _, resp in (responses or {}).items():
+    for code, resp in (responses or {}).items():
         if not isinstance(resp, dict):
             continue
+        
+        # Если сам ответ — это $ref
+        if "$ref" in resp:
+            resp = _deref_swagger2_schema(resp, swagger)
+            responses[code] = resp
+            _collect_unresolved_refs(resp, unresolved)
+
         if "schema" in resp:
             resp["schema"] = _deref_swagger2_schema(resp["schema"], swagger)
             _collect_unresolved_refs(resp["schema"], unresolved)
@@ -148,8 +172,9 @@ def extract_endpoints_swagger2(swagger: Dict[str, Any]) -> List[Dict[str, Any]]:
       responses, tags, operation_id, x_unresolved_refs
     }
     """
-    if swagger.get("swagger") != "2.0":
-        raise ValueError("This extractor supports Swagger 2.0 only (swagger: '2.0').")
+    # Поддерживаем и Swagger 2.0, и OpenAPI 3.0+ через общий резолвер
+    if not any(k in swagger for k in ("swagger", "openapi")):
+        raise ValueError("This extractor supports Swagger/OpenAPI files only (missing 'swagger' or 'openapi' fields).")
 
     endpoints: List[Dict[str, Any]] = []
     paths = swagger.get("paths", {}) or {}
