@@ -1,4 +1,6 @@
 from utils.ollama_client import send_messages, set_debug
+from utils.console import *
+from utils.text_utils import strip_markdown
 import os
 from pathlib import Path
 import json
@@ -6,20 +8,6 @@ from utils.swagger_parser import extract_endpoints_swagger2
 import glob
 from prompts import search_implementation, merge_results, generate_cases, write_tests
 import argparse
-
-
-def strip_markdown(text):
-    """Убирает markdown-разметку из текста."""
-    text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    elif text.startswith("```"):
-        text = text[3:]
-    
-    if text.endswith("```"):
-        text = text[:-3]
-    
-    return text.strip()
 
 
 # Парсинг аргументов командной строки
@@ -30,25 +18,37 @@ args = parser.parse_args()
 # Установка режима отладки
 set_debug(args.debug)
 
-# 1. Получаем список всех доступных сервисов(абсолютные пути)
+# Глобальный кеш для conftest
+cached_fixtures_info = None
 
+# 1. Получаем список всех доступных сервисов(абсолютные пути)
+print_step(1, "Получение списка сервисов") # ... (существующий код)
 
 source_codes_path = os.path.join(os.path.dirname(__file__), "source_codes")
+
+# Автоматическое создание директории source_codes
+if not os.path.exists(source_codes_path):
+    os.makedirs(source_codes_path)
+    print_warning(f"Создана директория: {source_codes_path}")
+    print_info("Поместите в неё папки с сервисами (исходный код + swagger.json)")
 services = [p for p in Path(source_codes_path).iterdir() if p.is_dir()]
 
 # 2. Парсим swagger.json
+print_step(2, "Парсинг swagger.json")
 for service in services:
     swagger_path = os.path.join(service, "swagger.json")
     with open(swagger_path, "r") as f:
         swagger = json.load(f)
 
     # 3. Получаем список эндпоинтов
+    print_step(3, "Получение списка эндпоинтов")
     endpoints = extract_endpoints_swagger2(swagger)
     
     for endpoint in endpoints:
-        print(f"\nProcessing endpoint: {endpoint['method']} {endpoint['path']}")
+        print_header(f"{endpoint['method']} {endpoint['path']}")
  
-         # 4. Получаем абсолютный путь ко всем файлам сервиса
+        # 4. Получаем абсолютный путь ко всем файлам сервиса
+        print_step(4, "Получение списка файлов")
         files_path = os.path.join(service, "**", "*")
         files = glob.glob(files_path, recursive=True)
         # Исключаем файл swagger.json
@@ -99,6 +99,8 @@ for service in services:
             return False
         
         # 5. Получаем реализацию эндпоинта в исходном коде
+        print_step(5, "Получение реализации эндпоинта")
+
         source_code_schema = ""
         
         for attempt in range(1, 11):  # Максимум 10 попыток
@@ -151,8 +153,9 @@ for service in services:
                     remove_file(data['file'])
                     continue
                 
-                print(f"  [FOUND] Реализация найдена!")
-                print(f"  [EVIDENCE] {data['code_evidence'][:200]}...")
+                print_success("Реализация найдена!")
+                code_evidence_str = data['code_evidence']
+                print_info(f"Код: {code_evidence_str[:80]}...")
                 
                 if data['schema_fields']:
                     print(f"  [SCHEMA] {data['schema_fields'][:100]}...")
@@ -181,7 +184,7 @@ for service in services:
                 if files:
                     removed_file = files.pop(0)
                     print(f"  [WARNING] Не удалось извлечь FILE")
-                    print(f"  [INFO] Файл {removed_file} удалён (fallback). Осталось: {len(files)}")
+                    print_info(f"Файл {os.path.basename(removed_file)} удалён (fallback). Осталось: {len(files)}")
                 continue
 
         if not source_code_schema:
@@ -189,6 +192,7 @@ for service in services:
             continue
         
         # 6. Объединяем результаты в один JSON
+        print_step(6, "Объединение результатов")
         prompt = merge_results.get_user_prompt(endpoint, source_code_schema)
 
         system_prompt = merge_results.SYSTEM_PROMPT
@@ -202,6 +206,7 @@ for service in services:
         merged_schema = strip_markdown(merged_schema)
 
         # 7. Генерируем кейсы
+        print_step(7, "Генерация тестовых кейсов")
         prompt = generate_cases.get_user_prompt(merged_schema)
 
         system_prompt = generate_cases.SYSTEM_PROMPT
@@ -214,34 +219,158 @@ for service in services:
         )
         gen_cases = strip_markdown(gen_cases)
 
-        exit()
-
-        # 8. Формируем файл с тестами
-        system_prompt = write_tests.SYSTEM_PROMPT
-
+        # 8. Формируем файл с тестами (6 подшагов)
         root_path_services = os.path.join(os.path.dirname(__file__), "services")
         service_test_dir = os.path.join(root_path_services, service.name)
         
         endpoint_filename = endpoint['path'].strip('/').replace('/', '_') or "root"
         full_path_endpoint = os.path.join(service_test_dir, f"{endpoint_filename}.py")
 
-        prompt = write_tests.get_user_prompt(full_path_endpoint, root_path_services, gen_cases)
+        print_step(8, "Создание файла тестов")
+        print_info(f"Файл: {full_path_endpoint}")
 
-        history = []
-        max_attempts = 20  # Максимум 20 попыток для защиты от бесконечного цикла
-        i = 0
+        # 8.1 Проверка существования файла
+        print_substep("8.1", "Проверка файла")
+        prompt = write_tests.get_step1_check_file_prompt(full_path_endpoint)
+        result, _ = send_messages(prompt, step_name="Проверка файла")
+        file_exists = result.upper().strip().rstrip('.!?') == "СУЩЕСТВУЕТ"  # Точная проверка (игнорируем знаки препинания)
+        existing_content = ""
         
-        while i < max_attempts:
-            result, all_messages = send_messages(
-                prompt, 
-                history=history, 
-                system_prompt=system_prompt,
-                step_name=f"Создание файла тестов (попытка {i+1})"
-            )
-            history = all_messages
-            clean_result = result.strip()
+        if file_exists:
+            print_warning("Файл уже существует, будем объединять кейсы")
+            with open(full_path_endpoint, 'r') as f:
+                existing_content = f.read()
+        else:
+            print_info("Файл не существует, будет создан")
 
-            if clean_result.upper() == "DONE":
-                break
+        # 8.2 Чтение conftest.py (с кешированием)
+        print_substep("8.2", "Чтение conftest.py")
+        conftest_path = os.path.join(root_path_services, "conftest.py")
+        
+        if cached_fixtures_info:
+            fixtures_info = cached_fixtures_info
+            print_info("Используем закешированную информацию о фикстурах")
+        else:
+            prompt = write_tests.get_step2_read_conftest_prompt(conftest_path)
+            fixtures_info, _ = send_messages(prompt, step_name="Чтение conftest")
+            cached_fixtures_info = fixtures_info
+            print_success("Фикстуры найдены и закешированы")
+
+        # 8.3 Преобразование кейсов JSON → Python
+        print_substep("8.3", "Преобразование кейсов JSON → Python")
+        prompt = write_tests.get_step3_transform_cases_prompt(gen_cases)
+        result, _ = send_messages(prompt, use_tools=False, step_name="Преобразование кейсов")
+        cases_code = strip_markdown(result)
+        
+        
+        # Парсим POSITIVE_CASES и NEGATIVE_CASES
+        positive_cases = "[]"
+        negative_cases = "[]"
+        if "POSITIVE_CASES" in cases_code:
+            start = cases_code.find("POSITIVE_CASES = ")
+            if start != -1:
+                end = cases_code.find("\n\nNEGATIVE_CASES", start)
+                if end == -1:
+                    end = cases_code.find("\nNEGATIVE_CASES", start)
+                if end != -1:
+                    positive_cases = cases_code[start:end].replace("POSITIVE_CASES = ", "").strip()
+        
+        if "NEGATIVE_CASES" in cases_code:
+            start = cases_code.find("NEGATIVE_CASES = ")
+            if start != -1:
+                negative_cases = cases_code[start:].replace("NEGATIVE_CASES = ", "").strip()
+        
+        # Валидация: проверка количества кейсов
+        try:
+            json_cases = json.loads(gen_cases)
+            json_count = len(json_cases)
+            python_count = positive_cases.count("pytest.param") + negative_cases.count("pytest.param")
             
-            i += 1
+            if python_count < json_count:
+                print_warning(f"Модель потеряла кейсы! JSON: {json_count}, Python: {python_count}")
+            elif python_count == json_count:
+                print_success(f"Все {json_count} кейсов преобразованы корректно")
+            else:
+                print_info(f"Кейсов: JSON={json_count}, Python={python_count}")
+        except Exception as e:
+            print_warning(f"Не удалось проверить количество кейсов: {e}")
+        
+        print_success("Кейсы преобразованы")
+
+        # 8.4 Генерация кода теста
+        print_substep("8.4", "Генерация кода теста")
+        
+        # merged_schema это строка JSON, нужно распарсить
+        try:
+            merged_schema_dict = json.loads(merged_schema)
+            schema_json = json.dumps(merged_schema_dict.get('responses', {}).get('200', {}).get('schema', {}))
+        except json.JSONDecodeError:
+            print(f"  [ERROR] Не удалось распарсить merged_schema как JSON")
+            schema_json = "{}"
+        
+        prompt = write_tests.get_step4_generate_code_prompt(
+            endpoint['path'],
+            endpoint.get('method', 'GET'),
+            schema_json,
+            positive_cases,
+            negative_cases,
+            fixtures_info,
+            existing_content
+        )
+        result, _ = send_messages(prompt, use_tools=False, step_name="Генерация кода")
+        
+        # Убираем markdown разметку (включая dedent)
+        test_code = strip_markdown(result)
+        
+        # autopep8 для базового PEP8 форматирования (без агрессивных изменений)
+        try:
+            import autopep8
+            original_code = test_code
+            test_code = autopep8.fix_code(test_code)  # Без aggressive - только базовые исправления
+            
+            if test_code != original_code:
+                print_info("Код отформатирован (autopep8)")
+        except Exception as e:
+            print_warning(f"autopep8: {e}")
+        
+        test_code = test_code.strip()
+
+        
+        print_success(f"Код сгенерирован ({len(test_code)} символов)")
+
+        # 8.5 Валидация синтаксиса Python
+        print_substep("8.5", "Валидация синтаксиса Python")
+        try:
+            compile(test_code, '<string>', 'exec')
+            print_success("Код валидный")
+        except SyntaxError as e:
+            print_error(f"Синтаксическая ошибка: {e}")
+            print_warning("Пропускаем создание файла")
+            continue
+
+        # 8.5.1 Проверка на потерю тестов (Safety Check)
+        if file_exists and existing_content:
+            old_tests_count = existing_content.count("def test_")
+            new_tests_count = test_code.count("def test_")
+            
+            if new_tests_count < old_tests_count:
+                print_error(f"ОПАСНОСТЬ: Модель потеряла тесты! Было: {old_tests_count}, Стало: {new_tests_count}")
+                print_warning("Файл НЕ будет перезаписан для безопасности.")
+                continue
+            
+            print_success(f"Количество тестов: {old_tests_count} -> {new_tests_count}")
+
+        # 8.6 Запись файла
+        print_substep("8.6", "Запись файла")
+        
+        # Создать директорию если нужно
+        if not file_exists:
+            os.makedirs(os.path.dirname(full_path_endpoint), exist_ok=True)
+            print_info(f"Директория создана: {os.path.basename(os.path.dirname(full_path_endpoint))}")
+        
+        # Записать файл НАПРЯМУЮ (без LLM, чтобы не портить код)
+        with open(full_path_endpoint, 'w', encoding='utf-8') as f:
+            f.write(test_code)
+        
+        print_success(f"Файл с тестами {'обновлён' if file_exists else 'создан'}!")
+        print_info(f"Путь: {full_path_endpoint}")

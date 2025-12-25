@@ -33,11 +33,6 @@ def set_debug(value: bool):
 
 def build_agent(system_prompt: Optional[str] = None, use_tools: bool = True) -> Agent:
     model = OllamaCompatibleOpenAIModel(
-        # "qwen2.5-coder:7b-instruct",
-        # "llama3.1:8b",
-        # "qwen2.5:7b-instruct",
-        # "qwen2.5-coder:14b-instruct-q2_K",
-        # "hermes3",
         "llama3.1:8b-instruct-q5_K_M",
         provider=OpenAIProvider(
             base_url="http://127.0.0.1:11434/v1",
@@ -47,7 +42,7 @@ def build_agent(system_prompt: Optional[str] = None, use_tools: bool = True) -> 
     
     # Используем переданный системный промпт или дефолтный
     default_system_prompt = """
-    Ты работаешь в роли API Test Generator и Endpoint Analyst.
+    Ты помощник. Следуй инструкциям.
     """
     
     final_system_prompt = system_prompt if system_prompt is not None else default_system_prompt

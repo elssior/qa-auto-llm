@@ -2,10 +2,11 @@ from typing import List
 import os
 from pathlib import Path
 from pydantic_ai import Agent
+from utils.console import print_tool_call
 
 def read_file(path: str) -> str:
     """Читает содержимое файла по указанному пути. Возвращает текст файла или сообщение об ошибке."""
-    print(f"Инструмент read_file: {path}")
+    print_tool_call("read_file", os.path.basename(path))
     try:
         with open(path, "r", encoding='utf-8') as f:
             return f.read()
@@ -14,7 +15,7 @@ def read_file(path: str) -> str:
 
 def write_files(path: str, contents: str) -> str:
     """Записывает переданное содержимое в файл. Если папки не существуют, они будут созданы."""
-    print(f"Инструмент write_files: {path}")
+    print_tool_call("write_files", os.path.basename(path))
     try:
         directory = os.path.dirname(path)
         if directory:
@@ -27,7 +28,7 @@ def write_files(path: str, contents: str) -> str:
 
 def append_file(path: str, contents: str) -> str:
     """Добавляет содержимое в конец существующего файла."""
-    print(f"Инструмент append_file: {path}")
+    print_tool_call("append_file", os.path.basename(path))
     try:
         with open(path, "a", encoding='utf-8') as f:
             f.write(contents)
@@ -37,12 +38,12 @@ def append_file(path: str, contents: str) -> str:
 
 def check_exists(path: str) -> bool:
     """Проверяет существование файла или директории по указанному пути."""
-    print(f"Инструмент check_exists: {path}")
+    print_tool_call("check_exists", os.path.basename(path))
     return Path(path).exists()
 
 def list_directory(path: str) -> List[str]:
     """Возвращает список всех файлов и подпапок в указанной директории."""
-    print(f"Инструмент list_directory: {path}")
+    print_tool_call("list_directory", os.path.basename(path))
     try:
         dir_path = Path(path)
         if not dir_path.exists():
@@ -55,7 +56,7 @@ def list_directory(path: str) -> List[str]:
 
 def create_directory(path: str) -> str:
     """Создает директорию (и все промежуточные), если они еще не существуют."""
-    print(f"Инструмент create_directory: {path}")
+    print_tool_call("create_directory", os.path.basename(path))
     try:
         os.makedirs(path, exist_ok=True)
         return f"Directory {path} created or already exists"
