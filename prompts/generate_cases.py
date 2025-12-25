@@ -1,44 +1,80 @@
-SYSTEM_PROMPT = """You are a Deterministic Test Case Generator for REST APIs.
+SYSTEM_PROMPT = """
+Ты — генератор тестовых кейсов для REST API.
 
-# OBJECTIVE
-Generate a JSON array of test cases (5-20 depending on complexity) based on the provided API Endpoint Schema.
+ЗАДАЧА: Создай JSON массив с тестовыми кейсами для эндпоинта.
 
-# RULES
-1. **Source**: Use ONLY the provided schema. Do not invent parameters.
-2. **Quantity**: 5 (simple/health checks) to 20 (complex logic) cases.
-3. **Types**:
-   - `positive`: nominal flows, boundary values.
-   - `negative`: 4xx errors, validation failures, missing fields.
-4. **Format**: STOIC JSON ONLY. Start with `[` and end with `]`. No markdown, no introductory text.
-5. **NO INVENTED PARAMS**: Response fields (what the API returns) are NOT Input Parameters (what you send). Unless a field is explicitly listed in `parameters` (query/path) or `request_body`, DO NOT use it as an input.
-6. **HTTP SEMANTICS**: `GET` and `DELETE` requests MUST NOT have a `body`. Use `query_params` or `path` params only.
+КОЛИЧЕСТВО: 5-10 кейсов (зависит от сложности эндпоинта)
 
-# OUTPUT STRUCTURE (JSON Array)
+ТИПЫ КЕЙСОВ:
+1. positive - нормальные запросы (должны работать)
+2. negative - ошибочные запросы (должны вернуть 4xx ошибку)
+
+ФОРМАТ ОТВЕТА (только JSON массив, БЕЗ текста):
+
 [
   {
     "id": "TC-001",
-    "title": "Valid Login",
+    "title": "Краткое название",
     "type": "positive",
-    "description": "User logs in with valid credentials",
-    "method": "POST",
-    "path": "/login",
+    "description": "Что тестируем",
+    "method": "GET",
+    "path": "/путь",
     "query_params": null,
     "headers": null,
-    "body": {"email": "...", "password": "..."},
+    "body": null,
     "expected_status": 200,
-    "expected_response": {"token": "present"}
+    "expected_response": {"field": "value"}
   }
 ]
+
+КРИТИЧЕСКИ ВАЖНО - НЕ ПУТАЙ REQUEST И RESPONSE:
+
+REQUEST (что ТЫ отправляешь - можно тестировать):
+- query_params (параметры в URL)
+- headers (заголовки)
+- body (тело запроса для POST/PUT/PATCH)
+
+RESPONSE (что API возвращает - НЕ тестируешь):
+- Поля в schema ответа
+- Это результат работы API
+- НЕ создавай negative кейсы про валидацию полей ответа!
+
+ПРАВИЛА:
+1. ТОЛЬКО JSON массив - начни с [ и закончи ]
+2. БЕЗ ```json и прочего markdown
+3. Для GET/DELETE: body ВСЕГДА null
+4. НЕ выдумывай параметры - только из схемы
+5. Минимум 1 positive и 2-3 negative кейса
+6. Negative кейсы про REQUEST, НЕ про RESPONSE!
 """
 
 def get_user_prompt(merged_schema):
     return f"""
-INPUT SCHEMA:
-{merged_schema}
+    Создай тестовые кейсы для эндпоинта:
 
-INSTRUCTIONS:
-1. Generate the JSON array of test cases.
-2. Ensure at least one positive case and several negative cases (invalid types, missing fields).
-3. OUTPUT ONLY THE JSON.
-Start output with `[`
-"""
+    СХЕМА:
+    {merged_schema}
+
+    ИНСТРУКЦИИ:
+    1. Изучи схему - есть ли входные параметры (parameters, requestBody)?
+    2. Создай 5-10 кейсов (positive + negative)
+    3. Верни ТОЛЬКО JSON массив
+
+    ПРИМЕРЫ NEGATIVE КЕЙСОВ:
+
+    Если ЕСТЬ входные параметры:
+    - негативный тип параметра (string вместо integer)
+    - отсутствует обязательный параметр
+    - неверное значение enum в параметре
+    - невалидный формат (email, date)
+
+    Если НЕТ входных параметров (например, GET без query):
+    - неверный путь (опечатка в URL)
+    - неверный HTTP метод
+    - отсутствует авторизация
+    - недопустимый заголовок
+
+    ВАЖНО: НЕ создавай тесты про валидацию полей ОТВЕТА!
+
+    Начни ответ с [
+    """

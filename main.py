@@ -201,8 +201,6 @@ for service in services:
         )
         merged_schema = strip_markdown(merged_schema)
 
-        exit()
-
         # 7. Генерируем кейсы
         prompt = generate_cases.get_user_prompt(merged_schema)
 
@@ -215,16 +213,18 @@ for service in services:
             step_name="Генерация тестовых кейсов"
         )
         gen_cases = strip_markdown(gen_cases)
-        
+
+        exit()
+
+        # 8. Формируем файл с тестами
+        system_prompt = write_tests.SYSTEM_PROMPT
+
         root_path_services = os.path.join(os.path.dirname(__file__), "services")
         service_test_dir = os.path.join(root_path_services, service.name)
         
         endpoint_filename = endpoint['path'].strip('/').replace('/', '_') or "root"
         full_path_endpoint = os.path.join(service_test_dir, f"{endpoint_filename}.py")
-        
-        # 8. Формируем файл с тестами
-        system_prompt = write_tests.SYSTEM_PROMPT
- 
+
         prompt = write_tests.get_user_prompt(full_path_endpoint, root_path_services, gen_cases)
 
         history = []
