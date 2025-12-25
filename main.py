@@ -8,6 +8,20 @@ from prompts import search_implementation, merge_results, generate_cases, write_
 import argparse
 
 
+def strip_markdown(text):
+    """Убирает markdown-разметку из текста."""
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    
+    if text.endswith("```"):
+        text = text[:-3]
+    
+    return text.strip()
+
+
 # Парсинг аргументов командной строки
 parser = argparse.ArgumentParser(description="API Test Generator")
 parser.add_argument("--debug", action="store_true", help="Включить подробный вывод")
@@ -174,8 +188,6 @@ for service in services:
             print(f"Прекращение обработки эндпоинта {endpoint['path']} после 10 попыток.")
             continue
         
-        exit()
-
         # 6. Объединяем результаты в один JSON
         prompt = merge_results.get_user_prompt(endpoint, source_code_schema)
 
@@ -188,6 +200,8 @@ for service in services:
             step_name="Объединение результатов (Swagger + Code)"
         )
         merged_schema = strip_markdown(merged_schema)
+
+        exit()
 
         # 7. Генерируем кейсы
         prompt = generate_cases.get_user_prompt(merged_schema)

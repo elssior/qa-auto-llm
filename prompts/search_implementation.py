@@ -1,88 +1,70 @@
 SYSTEM_PROMPT = """
-Ты — эксперт по анализу кода. Твоя задача: найти реализацию эндпоинта и извлечь ВСЮ информацию как в Swagger.
+Ты — помощник для анализа кода. 
 
-ЦЕЛЬ: Собрать ПОЛНУЮ информацию об эндпоинте для генерации Swagger документации.
+ТВОЯ ЕДИНСТВЕННАЯ ЗАДАЧА: Вызвать инструмент read_file для чтения файла.
 
-ФОРМАТ ОТВЕТА (только текст, БЕЗ JSON):
+ОБЯЗАТЕЛЬНО:
+1. Вызови инструмент read_file с путём к файлу
+2. После чтения файла - проанализируй код и ответь в формате ниже
 
-Если НАШЁЛ:
+ФОРМАТ ОТВЕТА (после чтения файла):
+
+Если НАШЁЛ код с маршрутом:
 STATUS: FOUND
-FILE: /полный/путь/к/файлу
+FILE: <путь к прочитанному файлу>
 CODE_EVIDENCE:
-<точная цитата кода с маршрутом>
+<точная цитата кода из файла>
 
-SUMMARY: <краткое описание>
-DESCRIPTION: <полное описание>
-RESPONSE_CODE: <код ответа, например 200>
-RESPONSE_DESCRIPTION: <описание ответа>
-SCHEMA_TYPE: <object/array>
+SUMMARY: <описание>
+DESCRIPTION: <детали>
+RESPONSE_CODE: 200
+RESPONSE_DESCRIPTION: <описание>
+SCHEMA_TYPE: object или array
 SCHEMA_FIELDS:
-field_name: type | description
-nested_field.subfield: type | description
-array_field[]: object | description
-array_field[].item_property: type | description
+field: type | description
 
 Если НЕ НАШЁЛ:
 STATUS: NOT_FOUND
-FILE: /полный/путь/к/файлу
-REASON: <почему не нашёл>
-
-ТИПЫ ДАННЫХ:
-- string, integer, number, boolean
-- date-time, date, time
-- array, object
-- enum (укажи возможные значения через |)
+FILE: <путь к прочитанному файлу>
+REASON: <причина>
 
 КРИТИЧЕСКИ ВАЖНО:
-1. Собери ВСЮ информацию: summary, description, response code, schema
-2. CODE_EVIDENCE = ТОЧНАЯ цитата из файла
-3. CODE_EVIDENCE ДОЛЖЕН содержать маршрут (например "/services")
-4. Для вложенных объектов используй точку: services[].name
-5. Для enum укажи значения: state: enum | good,bad
-6. ЗАПРЕЩЕНО выдумывать - только из кода!
+1. СНАЧАЛА вызови read_file - БЕЗ ЭТОГО НЕЛЬЗЯ ОТВЕЧАТЬ!
+2. Цитируй ТОЛЬКО реальный код из файла
+3. НЕ выдумывай код - только то, что прочитал
 """
 
 def get_user_prompt(method, path, files):
    return f"""
-Найди реализацию эндпоинта: {method} {path}
+Найди реализацию: {method} {path}
 
-ДОСТУПНЫЕ ФАЙЛЫ:
+ФАЙЛЫ:
 {files}
 
-АЛГОРИТМ:
-1. Вызови read_file для ОДНОГО файла из списка
-2. Найди функцию/метод обработчика маршрута "{path}"
-3. Найди определение типов данных ответа
-4. Извлеки ВСЮ информацию для Swagger:
-   - Summary (краткое описание)
-   - Description (полное описание)  
-   - Response code (обычно 200)
-   - Response description
-   - Schema type (object или array)
-   - Все поля схемы с типами
+ШАГ 1 (ОБЯЗАТЕЛЬНО): Вызови инструмент read_file
+- Выбери ОДИН файл из списка выше
+- Вызови: read_file(file_path="<путь к файлу>")
+- Дождись результата
 
-ПРИМЕР SCHEMA_FIELDS для вложенных данных:
-name: string | Service name
-enabled: boolean | Is service enabled
-state: enum | Service state | good,bad
-services: array | List of services
-services[]: object | Service object
-services[].id: integer | Service ID
-services[].name: string | Service name
+ШАГ 2 (после чтения): Найди в коде маршрут "{path}"
 
-ПРИМЕРЫ ПРАВИЛЬНОГО ПОВЕДЕНИЯ:
-✓ Вызвал read_file
-✓ Нашёл код с "{path}", процитировал ТОЧНО
-✓ Извлёк summary, description, response code
-✓ Перечислил ВСЕ поля с типами и вложенностью
-✓ Для enum указал возможные значения
+ШАГ 3 (если нашёл): Ответь форматом:
+STATUS: FOUND
+FILE: <путь к файлу>
+CODE_EVIDENCE:
+<код из файла>
 
-ПРИМЕРЫ НЕПРАВИЛЬНОГО ПОВЕДЕНИЯ:
-✗ Не вызвал read_file
-✗ Процитировал код БЕЗ упоминания "{path}"
-✗ Пропустил важные поля
-✗ Не указал вложенную структуру для array/object
-✗ Выдумал поля, которых нет в коде
+SUMMARY: <описание>
+SCHEMA_FIELDS:
+field: type | description
 
-ВАЖНО: Это ЕДИНСТВЕННЫЙ шанс собрать всю информацию! Следующий шаг просто преобразует в JSON.
+ШАГ 3 (если НЕ нашёл): Ответь:
+STATUS: NOT_FOUND
+FILE: <путь к файлу>
+REASON: <причина>
+
+ВАЖНО:
+- ОБЯЗАТЕЛЬНО вызови read_file ПЕРЕД ответом
+- НЕ придумывай код - только из файла
+- Маршрут "{path}" должен быть в CODE_EVIDENCE
    """
