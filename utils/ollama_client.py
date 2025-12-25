@@ -37,7 +37,8 @@ def build_agent(system_prompt: Optional[str] = None, use_tools: bool = True) -> 
         # "llama3.1:8b",
         # "qwen2.5:7b-instruct",
         # "qwen2.5-coder:14b-instruct-q2_K",
-        "hermes3",
+        # "hermes3",
+        "llama3.1:8b-instruct-q5_K_M",
         provider=OpenAIProvider(
             base_url="http://127.0.0.1:11434/v1",
             api_key="ollama",

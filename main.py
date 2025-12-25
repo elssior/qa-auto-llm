@@ -8,26 +8,6 @@ from prompts import search_implementation, merge_results, generate_cases, write_
 import argparse
 
 
-def strip_markdown(text: str) -> str:
-    """Удаляет markdown-разметку (блоки кода), если она есть, и извлекает содержимое первого блока."""
-    text = text.strip()
-    if "```" in text:
-        # Пытаемся найти начало первого блока
-        start_idx = text.find("```")
-        # Пропускаем саму метку ``` и возможный идентификатор языка (например, ```json)
-        after_start = text[start_idx+3:]
-        first_newline = after_start.find("\n")
-        if first_newline != -1:
-            content_start = start_idx + 3 + first_newline + 1
-        else:
-            content_start = start_idx + 3
-        
-        # Ищем конец блока
-        end_idx = text.find("```", content_start)
-        if end_idx != -1:
-            return text[content_start:end_idx].strip()
-    return text
-
 # Парсинг аргументов командной строки
 parser = argparse.ArgumentParser(description="API Test Generator")
 parser.add_argument("--debug", action="store_true", help="Включить подробный вывод")
@@ -60,36 +40,140 @@ for service in services:
         # Исключаем файл swagger.json
         files = [f for f in files if not os.path.basename(f) == "swagger.json" and os.path.isfile(f)]
         
-        # Приоритизация файлов: контроллеры, роуты и хендлеры в начало списка
-        def file_priority(filepath):
-            name = filepath.lower()
-            if any(k in name for k in ['route', 'controller', 'handler', 'api', 'rest']):
-                return 0
-            return 1
+        # Фильтруем файлы, оставляя только исходный код
+        source_extensions = {'.ml', '.mli', '.py', '.js', '.ts', '.go', '.java', '.c', '.cpp', '.h', '.rs'}
+        files = [f for f in files if Path(f).suffix in source_extensions]
         
-        files.sort(key=file_priority)
+        # Вспомогательные функции
+        def parse_text_response(text):
+            """Парсит текстовый ответ модели"""
+            lines = text.strip().split('\n')
+            data = {'status': None, 'file': None, 'reason': None, 'code_evidence': [], 'schema_fields': []}
+            current_section = None
+            
+            for i, line in enumerate(lines):
+                line_stripped = line.strip()
+                
+                # Простые поля
+                for key, prefix in [('status', 'STATUS:'), ('file', 'FILE:'), ('reason', 'REASON:')]:
+                    if line_stripped.startswith(prefix):
+                        data[key] = line_stripped[len(prefix):].strip()
+                        current_section = None
+                        break
+                else:
+                    # Секции с несколькими строками
+                    if line_stripped.startswith('CODE_EVIDENCE:'):
+                        current_section = 'code'
+                    elif line_stripped.startswith('SCHEMA_FIELDS:'):
+                        current_section = 'schema'
+                    elif current_section == 'code':
+                        data['code_evidence'].append(lines[i])
+                    elif current_section == 'schema' and line_stripped:
+                        data['schema_fields'].append(lines[i])
+            
+            data['code_evidence'] = '\n'.join(data['code_evidence']).strip()
+            data['schema_fields'] = '\n'.join(data['schema_fields']).strip()
+            return data
+        
+        def remove_file(file_path):
+            """Удаляет файл из списка и выводит информацию"""
+            if file_path and file_path in files:
+                files.remove(file_path)
+                print(f"  [INFO] Файл {file_path} удалён из списка.")
+                print(f"  [INFO] Осталось файлов: {len(files)}")
+                return True
+            return False
         
         # 5. Получаем реализацию эндпоинта в исходном коде
-        system_prompt = search_implementation.SYSTEM_PROMPT
-        history = []
-        i = 0
         source_code_schema = ""
         
-        prompt = search_implementation.get_user_prompt(
-            endpoint["method"], 
-            endpoint["path"], 
-            files, 
-            endpoint
-        )
-        result, all_messages = send_messages(
-            prompt, 
-            history, 
-            system_prompt, 
-            step_name="Поиск реализации"
-        )
+        for attempt in range(1, 11):  # Максимум 10 попыток
+            prompt = search_implementation.get_user_prompt(endpoint["method"], endpoint["path"], files)
+            result, all_messages = send_messages(
+                prompt, [], search_implementation.SYSTEM_PROMPT,
+                step_name=f"Поиск реализации (попытка {attempt})"
+            )
+            
+            # Проверяем вызов read_file
+            tool_called = any(
+                hasattr(msg, 'parts') and any(
+                    hasattr(part, 'tool_name') and part.tool_name == 'read_file'
+                    for part in (msg.parts if hasattr(msg, 'parts') else [])
+                )
+                for msg in all_messages
+            )
+            
+            if not tool_called:
+                print(f"  [WARNING] Модель НЕ вызвала read_file! Пропускаем итерацию.")
+                continue
+            
+            try:
+                # Парсим ответ
+                data = parse_text_response(result)
+                
+                # Валидация формата
+                if not data['status'] or not data['file']:
+                    print(f"  [ERROR] Неверный формат ответа: отсутствует STATUS или FILE")
+                    continue
+                
+                print(f"  [INFO] Файл: {data['file']}")
+                
+                # NOT_FOUND
+                if data['status'] == 'NOT_FOUND':
+                    print(f"  [NOT FOUND] Реализация не найдена")
+                    if data['reason']:
+                        print(f"  [REASON] {data['reason']}")
+                    remove_file(data['file'])
+                    continue
+                
+                # Неизвестный статус
+                if data['status'] != 'FOUND':
+                    print(f"  [ERROR] Неизвестный STATUS: {data['status']}")
+                    continue
+                
+                # FOUND - проверки
+                if not data['code_evidence']:
+                    print(f"  [ERROR] FOUND, но нет CODE_EVIDENCE")
+                    remove_file(data['file'])
+                    continue
+                
+                print(f"  [FOUND] Реализация найдена!")
+                print(f"  [EVIDENCE] {data['code_evidence'][:200]}...")
+                
+                if data['schema_fields']:
+                    print(f"  [SCHEMA] {data['schema_fields'][:100]}...")
+                
+                # СТРОГАЯ проверка: маршрут в code_evidence
+                if endpoint['path'] not in data['code_evidence']:
+                    print(f"  [REJECT] CODE_EVIDENCE НЕ содержит маршрут {endpoint['path']}!")
+                    print(f"  [REJECT] Это галлюцинация - модель процитировала нерелевантный код.")
+                    remove_file(data['file'])
+                    continue
+                
+                # Успех!
+                source_code_schema = result.strip()
+                break
+                
+            except Exception as e:
+                print(f"  [ERROR] Ошибка обработки: {e}")
+                
+                # Пытаемся извлечь FILE:
+                import re
+                match = re.search(r'FILE:\s*(.+)', result)
+                if match and remove_file(match.group(1).strip()):
+                    continue
+                
+                # Fallback - удаляем первый файл
+                if files:
+                    removed_file = files.pop(0)
+                    print(f"  [WARNING] Не удалось извлечь FILE")
+                    print(f"  [INFO] Файл {removed_file} удалён (fallback). Осталось: {len(files)}")
+                continue
 
-        source_code_schema = strip_markdown(result)
-
+        if not source_code_schema:
+            print(f"Прекращение обработки эндпоинта {endpoint['path']} после 10 попыток.")
+            continue
+        
         exit()
 
         # 6. Объединяем результаты в один JSON
